@@ -1,0 +1,242 @@
+---
+title: "Evolutionary Couplings with N-glycosylation Sites"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# 0, .01, .1
+min_prob = 0
+# .5, 1, 2, 10
+L_mult = .33
+```
+
+
+Here we aim to determine the relation between glycoimpactful amino-acid substitutions and N-glycosylation sites by looking at which substitutions are coupled with the N-glycosylation sites. 
+
+- to determine which enrichments are real, we compare to a background for each AA
+- to distinguish protein influence vs glycan influence we compare to both blossum and glycoimpact
+
+```{r}
+# load protien-glycan structure relations
+setwd('G:/My Drive/00_professional/projects/GTspecificity/')
+file_protein_structure_motif05 = 'annotation/01_webscrape/uniprot-annotation_type_carbohyd-organism_human-filtered-reviewed.tsv'
+glycosites = read.table(file_protein_structure_motif05,sep='\t',header=T,fill=T)[,-c(3:6)]
+glycosites$Glycosylation = strsplit(glycosites$Glycosylation,split=';')
+#head(UNICARB_PSTRUC_GSTRUC[,1:10])
+#head(glycosites)
+
+glycosites = separate_rows( cbind(glycosites[,1:3], sites=unlist(lapply( glycosites$Glycosylation , function(x){
+  paste( as.numeric(trimws(gsub('CARBOHYD ','',x[grepl('CARB',x)]))) , collapse=',')
+}))),sites)
+
+head(glycosites)
+```
+```{r}
+if(file.exists('annotation/02_structure_annot/EV_2005_KellyBrock_human/EV.rda')){
+  load('annotation/02_structure_annot/EV_2005_KellyBrock_human/EV.rda')
+}else{
+  fs=list.files('annotation/02_structure_annot/EV_2005_KellyBrock_human/ec_files',full.names = T)
+  
+  ### load Evo Coupling structures
+  #fs=system('ls GTspec_UNICARBKBevMarks_query/data/curate_output_Kellman/*/*_CouplingScores_longrange.csv',intern = T)
+  
+  range = 1:11
+  sort_on = 'score'
+  
+  pb <- txtProgressBar(min = 0, max = length(fs), style = 3)
+  
+  
+  #fs=dir('GTspec_UNICARBKBevMarks_query/data/curate_output_Kellman/',recursive = T,full.names = T,
+  #       pattern = '*_CouplingScores_longrange.csv')
+  
+  EV = lapply(1:length(fs),function(i){
+      x = fs[i]
+      setTxtProgressBar(pb, i)
+      tmp = NULL
+      try( tmp <- read.csv(x)[,1:11] )
+      if(is.null(tmp)){return(NA)}
+      #tmp$protein = gsub('_.*|/','',gsub('GTspec_UNICARBKBevMarks_query/data/curate_output_Kellman/','',x))
+      tmp$protein = paste(gsub('_.*','',gsub('.*\\/','',x)),'HUMAN',sep='_')
+      L = max(tmp$i) - min(tmp$i)
+      tmp = tmp[order(tmp[[sort_on]],decreasing = T)[1:(L*L_mult)],]
+      tmp
+      })
+  
+  EV = do.call(rbind,EV) #[,-c(7:8)]
+  
+  # i	A_i	j	A_j	fn	cn	segment_i	segment_j	mad_score	probability	score
+  
+  colnames(EV) = c('seq_resnum','AA_i','seq_resnum_j','AA_j','fn','cn','segment_i','segment_j','mad_score','probability','score','uniprotID')
+  
+  EV = merge(EV,glycosites,by.x=c('uniprotID','seq_resnum'),by.y=c('Entry.name','sites'),all.x=T)
+  EV$is_Nsite = EV$AA_i=="N" & !is.na(EV$Entry)
+  
+  dim(EV)
+  #EV = merge(EV,aa_class,all.x=T)
+  dim(EV)
+  save(EV,file='annotation/02_structure_annot/EV_2005_KellyBrock_human/EV.rda')
+}
+head(EV)
+
+
+```
+
+
+** QUESTION **
+- If FN is an "frobenius" (euclidean) norm and CN is the average-product correction (correction for phylogeny and low sample size), what does it mean when FN=0 & CN >0?
+https://pubmed.ncbi.nlm.nih.gov/22163331/
+10.1101/021022
+10.1103/PhysRevE.87.012707
+
+- do probability & cn together provide a dual cutoff?
+- can I just look at probability > .1? Is that meaningful?
+```{r}
+library(ggplot2)
+
+ggplot(EV,aes(x=cn-min(cn)+1e-1,y=probability+1e-10))+
+  #geom_point(alpha=.3)+
+  geom_bin2d(bins=100)+
+  scale_fill_continuous(type = "viridis",trans='log10') +
+  scale_x_log10()+scale_y_log10()+
+  theme_bw()
+
+#pairs(cbind(EV$fn,EV$cn,EV$probability))
+```
+
+
+```{r}
+##### Extract glycosylation sites from EC file
+#EV$is_glycosite = paste(EV$seq_resnum,EV$uniprotID) %in% paste(UNICARB_PSTRUC_GSTRUC$seq_resnum,UNICARB_PSTRUC_GSTRUC$uniprotID)
+#EV_UPG = merge(EV,UNICARB_PSTRUC_GSTRUC)
+#head(EV_UPG[,1:20])
+#EV$seq_resnum
+head(EV)
+table(EV$is_Nsite,EV$AA_i)
+
+EV$type = factor(ifelse(EV$AA_i=='N',ifelse(EV$is_Nsite,'glycosite','N'),'other'))
+
+```
+```{r}
+library(ggpubr)
+### N: glycosite vs not
+my_comparisons <- list( c("other", "N"), c("other", "glycosite"), c("N", "glycosite") )[c(3,1,2)]
+
+g=ggboxplot((EV[ EV$probability>min_prob & !is.na(EV$AA_j) ,]),
+                x = "type", y = "probability",#alpha=0.4,
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                #color='uniprotID',alpha=0.4,
+                shape = "type",facet.by='AA_j')+geom_jitter(alpha=.01)+ylim(0,1.5)+
+  stat_compare_means(comparisons = my_comparisons,alternative = "greater")#+ # Add pairwise comparisons p-value
+  #ggtitle('Glycosite, N and General Coupling: F,Y,W\nF is the triangle driver?')+ylim(c(0,1.3))
+g
+ggsave(g,filename = paste0('figures/04.specific_questions/EVcoupling_2005/allAAj.prob.L',L_mult,'.minP.',min_prob,'.pdf'),height=10,width=10)
+
+g=ggboxplot(EV[ EV$probability>min_prob & !is.na(EV$AA_j) ,],
+                x = "type", y = "score",
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                #color='uniprotID',
+                shape = "type",facet.by='AA_j')+geom_jitter(alpha=.01)+
+  stat_compare_means(comparisons = my_comparisons,alternative = "greater")#+ # Add pairwise comparisons p-value
+  #ggtitle('Glycosite, N and General Coupling: F,Y,W\nF is the triangle driver?')+ylim(c(0,1.3))
+g
+ggsave(g,filename = paste0('figures/04.specific_questions/EVcoupling_2005/allAAj.score.L',L_mult,'.minP.',min_prob,'.pdf'),height=10,width=10)
+
+g=ggboxplot(EV[ EV$probability>min_prob & !is.na(EV$AA_j) ,],
+                x = "type", y = "mad_score",
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                #color='uniprotID',
+                shape = "type",facet.by='AA_j')+geom_jitter(alpha=.01)+
+  stat_compare_means(comparisons = my_comparisons,alternative = "greater")#+ # Add pairwise comparisons p-value
+  #ggtitle('Glycosite, N and General Coupling: F,Y,W\nF is the triangle driver?')+ylim(c(0,1.3))
+g
+ggsave(g,filename = paste0('figures/04.specific_questions/EVcoupling_2005/allAAj.mad_score.L',L_mult,'.minP.',min_prob,'.pdf'),height=10,width=10)
+
+tab=with(droplevels(EV[ EV$probability>min_prob  & EV$type!='other',]),
+     table(uniprotID,AA_j,type) )
+tab
+write.table(tab,file=paste0('figures/04.specific_questions/EVcoupling_2005/allAAj.L',L_mult,'.minP.',min_prob,'.ProtCounts.txt'))
+stop()
+```
+
+```{r}
+library(ggpubr)
+### N: glycosite vs not
+my_comparisons <- list( c("other", "N"), c("other", "glycosite"), c("N", "glycosite") )[c(3,1,2)]
+
+ggboxplot(EV[ EV$probability>min_prob & EV$AA_j %in% c('F','Y','W'),],
+                x = "type", y = "probability",
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                #color='uniprotID',
+                add = "jitter", shape = "type",facet.by='AA_j')+
+  stat_compare_means(comparisons = my_comparisons)+ # Add pairwise comparisons p-value
+  ggtitle('Glycosite, N and General Coupling: F,Y,W\nF is the triangle driver?')+ylim(c(0,1.3))
+
+with(droplevels(EV[ EV$probability>min_prob & EV$AA_j %in% c('F','Y','W') & EV$type!='other',]),
+     table(uniprotID,type) )
+
+#ggscatter(EV[ EV$probability>.1 & EV$AA_j %in% c('F','Y','W'),], 
+#          x = "cn", y = "probability",
+#   color = "type", palette = "jco",
+#   add = "reg.line",rug = TRUE)+
+#  stat_cor(aes(color = type), label.x = 3)           # Add correlation coefficient
+
+'minatom'
+
+#cn - mixture model --> probabiliyt
+#log normal (truish)
+#skew normal
+
+# how to threshold: work in progress, depends on how many strong ECs you get
+# good thresh: EC: [L, L/2 , 3L/2], L is seq length, L = max-min 
+
+```
+
+F, the potential "driver" glycoimpacting AA, is more coupled with glycosylation sites than it's glyco-dissimilar protein-non-impactful AAs, W and Y.
+
+the effect is threshold sensitive.
+
+
+```{r}
+p <- ggboxplot(EV[ EV$probability>min_prob & EV$AA_j %in% c('V','I','L'),],
+                x = "type", y = "probability",
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                add = "jitter", shape = "type",facet.by='AA_j')+
+  stat_compare_means(comparisons = my_comparisons)+ # Add pairwise comparisons p-value
+  #stat_compare_means(label.y=1.2)+
+  #stat_compare_means(aes(label = paste0("p = ", ..p.format..)))+
+  ggtitle('Glycosite, N and General Coupling: V,I,L\nNo clear driver')+ylim(c(0,1.3))
+p
+```
+
+```{r}
+p <- ggboxplot(EV[ EV$probability>min_prob & EV$AA_j %in% c('Q',"R","K"),],
+                x = "type", y = "probability",
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                add = "jitter", shape = "type",facet.by='AA_j')+
+  stat_compare_means(comparisons = my_comparisons)+ # Add pairwise comparisons p-value
+  #stat_compare_means(label.y=1.2)+
+  #stat_compare_means(aes(label = paste0("p = ", ..p.format..)))+
+  ggtitle('Glycosite, N and General Coupling: Q,R,K\nK and R are triangle drivers')+ylim(c(0,1.3))
+p
+```
+
+
+```{r}
+p <- ggboxplot(EV[ EV$probability>min_prob & EV$AA_j %in% c('Q',"E","K"),],
+                x = "type", y = "probability",
+                fill = "type", palette =c("#00AFBB","#E7B800", "#FC4E07"),
+                add = "jitter", shape = "type",facet.by='AA_j')+
+  stat_compare_means(comparisons = my_comparisons)+ # Add pairwise comparisons p-value
+  #stat_compare_means(label.y=1.2)+
+  #stat_compare_means(aes(label = paste0("p = ", ..p.format..)))+
+  ggtitle('Glycosite, N and General Coupling: Q,K,E\nK (&E) are triangle drivers')+ylim(c(0,1.3))
+p
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
